@@ -8,12 +8,15 @@ task has succeeded and the temporary JSON has been atomically replaced.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import time
 from pathlib import Path
 
 # Keep native libraries from creating a large CPU thread pool in every worker.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:64")
+os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -42,12 +45,15 @@ class SafeE5Encoder:
         chunk_size: int,
         cooldown_seconds: float,
         min_free_ram_gb: float,
+        empty_cache_every_chunk: bool,
     ) -> None:
         self.model = model
         self.batch_size = batch_size
         self.chunk_size = chunk_size
         self.cooldown_seconds = cooldown_seconds
         self.min_free_ram_bytes = int(min_free_ram_gb * 1024**3)
+        self.empty_cache_every_chunk = empty_cache_every_chunk
+        self.device_type = str(getattr(model, "device", "cpu")).split(":")[0]
 
         base_meta = ModelMeta.from_sentence_transformer_model(model)
         self.mteb_model_meta = base_meta.model_copy(
@@ -83,6 +89,8 @@ class SafeE5Encoder:
             )
             output[start : start + len(chunk)] = np.asarray(embeddings, dtype=np.float32)
             del embeddings
+            if self.device_type == "cuda" and self.empty_cache_every_chunk:
+                torch.cuda.empty_cache()
             if self.cooldown_seconds:
                 time.sleep(self.cooldown_seconds)
         return output
@@ -162,13 +170,127 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cooldown-seconds", type=float, default=0.25)
     parser.add_argument("--min-free-ram-gb", type=float, default=0.75)
     parser.add_argument("--cpu-threads", type=int, default=4)
+    parser.add_argument(
+        "--precision",
+        choices=("fp32", "fp16", "bf16", "int8", "auto"),
+        default="fp32",
+    )
+    parser.add_argument("--allow-precision-fallback", action="store_true")
+    parser.add_argument("--gpu-memory-fraction", type=float, default=0.90)
+    parser.add_argument("--attention-implementation", default="sdpa")
+    parser.add_argument("--empty-cache-every-chunk", action="store_true")
+    parser.add_argument("--disable-tf32", action="store_true")
     return parser.parse_args()
+
+
+def configure_torch(args: argparse.Namespace) -> None:
+    torch.set_num_threads(args.cpu_threads)
+    torch.set_num_interop_threads(min(2, args.cpu_threads))
+    if args.device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA demande mais indisponible")
+        torch.cuda.set_device(0)
+        if 0.05 <= args.gpu_memory_fraction <= 1.0:
+            torch.cuda.set_per_process_memory_fraction(args.gpu_memory_fraction, 0)
+        if not args.disable_tf32:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
+        torch.cuda.empty_cache()
+
+
+def model_kwargs_for_precision(args: argparse.Namespace, precision: str) -> dict:
+    kwargs = {"low_cpu_mem_usage": True}
+    if args.attention_implementation and args.attention_implementation != "default":
+        kwargs["attn_implementation"] = args.attention_implementation
+
+    if args.device != "cuda":
+        kwargs["torch_dtype"] = torch.float32
+        return kwargs
+
+    if precision == "fp32":
+        kwargs["torch_dtype"] = torch.float32
+    elif precision == "fp16":
+        kwargs["torch_dtype"] = torch.float16
+    elif precision == "bf16":
+        if not torch.cuda.is_bf16_supported():
+            raise RuntimeError("bf16 demande mais non supporte par ce GPU")
+        kwargs["torch_dtype"] = torch.bfloat16
+    elif precision == "auto":
+        kwargs["torch_dtype"] = "auto"
+    elif precision == "int8":
+        from transformers import BitsAndBytesConfig
+
+        kwargs["torch_dtype"] = torch.float16
+        kwargs["device_map"] = {"": 0}
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0,
+        )
+    else:
+        raise ValueError(f"Precision inconnue: {precision}")
+    return kwargs
+
+
+def load_model(args: argparse.Namespace) -> tuple[SentenceTransformer, str]:
+    precision_order = [args.precision]
+    if args.allow_precision_fallback and args.device == "cuda":
+        if args.precision in {"int8", "bf16", "auto"}:
+            precision_order.append("fp16")
+        precision_order.append("fp32")
+
+    last_error: Exception | None = None
+    tried: set[str] = set()
+    for precision in precision_order:
+        if precision in tried:
+            continue
+        tried.add(precision)
+        try:
+            kwargs = model_kwargs_for_precision(args, precision)
+            st_device = None if "device_map" in kwargs else args.device
+            model = SentenceTransformer(
+                args.model_dir,
+                device=st_device,
+                model_kwargs=kwargs,
+            )
+            model.eval()
+            print(
+                json.dumps(
+                    {
+                        "event": "model_loaded",
+                        "device": args.device,
+                        "precision": precision,
+                        "model_kwargs": sorted(kwargs),
+                    }
+                ),
+                flush=True,
+            )
+            return model, precision
+        except Exception as exc:
+            last_error = exc
+            print(
+                json.dumps(
+                    {
+                        "event": "model_load_failed",
+                        "precision": precision,
+                        "error": repr(exc),
+                    }
+                ),
+                flush=True,
+            )
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    raise RuntimeError(f"Impossible de charger le modele. Derniere erreur: {last_error!r}")
 
 
 def main() -> None:
     args = parse_args()
-    torch.set_num_threads(args.cpu_threads)
-    torch.set_num_interop_threads(min(2, args.cpu_threads))
+    configure_torch(args)
     if os.name == "nt":
         try:
             psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
@@ -181,11 +303,7 @@ def main() -> None:
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA demandé mais indisponible")
 
-    model = SentenceTransformer(
-        args.model_dir,
-        device=args.device,
-        model_kwargs={"torch_dtype": torch.float32},
-    )
+    model, actual_precision = load_model(args)
     encoder = SafeE5Encoder(
         model,
         model_name=args.model_label,
@@ -195,6 +313,7 @@ def main() -> None:
         chunk_size=args.chunk_size,
         cooldown_seconds=args.cooldown_seconds,
         min_free_ram_gb=args.min_free_ram_gb,
+        empty_cache_every_chunk=args.empty_cache_every_chunk,
     )
     if not isinstance(encoder, EncoderProtocol):
         raise TypeError("SafeE5Encoder ne satisfait pas EncoderProtocol")
@@ -217,8 +336,12 @@ def main() -> None:
         "model_path": str(Path(args.model_dir).resolve()),
         "benchmark_label": args.benchmark_label,
         "eval_device": args.device,
+        "precision": actual_precision,
         "batch_size": args.batch_size,
         "chunk_size": args.chunk_size,
+        "gpu_memory_fraction": args.gpu_memory_fraction if args.device == "cuda" else None,
+        "attention_implementation": args.attention_implementation,
+        "empty_cache_every_chunk": args.empty_cache_every_chunk,
         "normalize_embeddings": True,
         "query_prefix": "query: ",
         "passage_prefix": "passage: ",

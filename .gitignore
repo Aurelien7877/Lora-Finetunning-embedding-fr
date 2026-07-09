@@ -64,6 +64,12 @@ checkpoint-*/
 emebedding/e5-fr-miracl-lora/
 emebedding/e5-fr-miracl-lora-adapter/
 emebedding/e5-fr-miracl-lora-merged/
+emebedding/e5-fr-safe-lora/
+emebedding/e5-fr-safe-lora-adapter/
+emebedding/e5-fr-safe-lora-merged/
+emebedding/e5-fr-conservative-lora/
+emebedding/e5-fr-conservative-lora-adapter/
+emebedding/e5-fr-conservative-lora-merged/
 emebedding/mteb_fra_results/
 few-nerd/grpo_saved_lora/
 few-nerd/unsloth_compiled_cache/
