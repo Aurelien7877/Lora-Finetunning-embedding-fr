@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+error_logs.txt
+
+# Hugging Face / datasets / model caches
+.cache/
+hf_cache/
+huggingface/
+datasets/
+
+# Experiment trackers
+wandb/
+runs/
+lightning_logs/
+tensorboard/
+
+# Training outputs and intermediate checkpoints
+outputs/
+outputs_*/
+**/outputs/
+**/outputs_*/
+checkpoint-*/
+**/checkpoint-*/
+
+# Large ML artifacts kept locally, not in git
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+
+# Local project artifacts
+emebedding/e5-fr-miracl-lora/
+emebedding/e5-fr-miracl-lora-adapter/
+emebedding/e5-fr-miracl-lora-merged/
+emebedding/mteb_fra_results/
+few-nerd/grpo_saved_lora/
+few-nerd/unsloth_compiled_cache/

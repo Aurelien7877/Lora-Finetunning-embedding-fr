@@ -1,0 +1,31 @@
+# Fine-tuning GRPO FewNERD — local RTX 3060/3070 (8 GB VRAM), Windows
+# Python 3.12 recommandé.
+#
+# Installation complète (PowerShell, depuis f:/codeAI/llm) :
+#   py -3.12 -m venv .venv
+#   .venv\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   .venv\Scripts\pip install -r few-nerd\requirements.txt
+#   .venv\Scripts\python -m ipykernel install --user --name=llm-grpo --display-name="Python (llm-grpo)"
+#
+# Versions alignées sur le cookbook Liquid AI (sans vLLM — ne compile pas sous Windows).
+# torchao==0.16.0 : minimum requis par peft, compatible torch 2.6 (0.17+ casse l'import).
+
+unsloth==2026.4.8
+transformers==4.57.6
+trl==0.24.0
+torchao==0.16.0
+bitsandbytes
+xformers==0.0.29.post3
+triton-windows==3.2.0.post19
+pyarrow==21.0.0
+datasets==4.3.0
+pandas<3
+numpy
+accelerate
+peft
+safetensors
+huggingface_hub
+diffusers
+unsloth_zoo
+ipykernel
+jupyter
